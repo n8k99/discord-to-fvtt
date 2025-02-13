@@ -7,15 +7,8 @@ export const log = (message, ...args) => console.log(MODULE_ID, '|', message, ..
 
 let listener;
 
-// Map Discord channels to Polyglot languages
-const languageMapping = {
-  common: 'common',
-  elvish: 'elvish',
-  dwarvish: 'dwarvish'
-};
-
 Hooks.once('setup', () => {
-  // Register game settings
+  // Register settings for Discord integration
   game.settings.register(MODULE_ID, 'discordGuildId', {
     name: 'Discord Server ID',
     hint: 'Enter your Discord server ID.',
@@ -27,7 +20,7 @@ Hooks.once('setup', () => {
 
   game.settings.register(MODULE_ID, 'discordChannelIds', {
     name: 'Discord Channel IDs',
-    hint: 'Enter a list of channel ID filters, separated by commas. Leave this blank to relay all accessible channels.',
+    hint: 'Enter a list of channel ID filters, separated by commas. Leave blank to relay all accessible channels.',
     config: true,
     requiresReload: false,
     scope: 'world',
@@ -37,7 +30,7 @@ Hooks.once('setup', () => {
 
   game.settings.register(MODULE_ID, 'discordToken', {
     name: 'Discord Token',
-    hint: 'Enter your Discord bot token if you want to use your own bot.',
+    hint: 'Enter your Discord bot token for connecting to Discord.',
     config: true,
     requiresReload: false,
     scope: 'world',
@@ -45,28 +38,48 @@ Hooks.once('setup', () => {
     onChange: (value) => (listener.token = value)
   });
 
+  game.settings.register(MODULE_ID, 'discordToPolyglotMapping', {
+    name: 'Discord to Polyglot Mapping',
+    hint: 'Map Discord channels to Polyglot languages (e.g., {"common": "common", "elvish": "elvish"}).',
+    scope: 'world',
+    config: true,
+    type: Object,
+    default: { common: 'common', elvish: 'elvish', dwarvish: 'dwarvish' }
+  });
+
+  game.settings.register(MODULE_ID, 'outgoingMessageBehavior', {
+    name: 'Outgoing Message Behavior',
+    hint: 'Define how messages are sent to Discord (#common garbled vs plain text for specific channels).',
+    scope: 'world',
+    config: true,
+    type: Object,
+    default: {
+      garbleInCommon: true,
+      sendPlainToLanguageChannel: true
+    }
+  });
+
+  log('Settings registered successfully.');
+
   ChatRenderer.setup().catch((err) => console.error(MODULE_ID, { error: err }));
   listener = new Listener();
 });
 
-// Bi-directional communication logic
 Hooks.once('ready', () => {
   if (!game.users.activeGM.isSelf) return;
 
-  // Set listener token
+  // Assign listener token
   listener.token = game.settings.get(MODULE_ID, 'discordToken');
 
-  // Handle Discord -> FoundryVTT
-  listener.onMessage((discordMessage) => {
+  // Handle Discord → FoundryVTT messages
+  listener.onMessage(async (discordMessage) => {
     const { channel_id, content, author } = discordMessage;
-
-    const polyglotLanguage = Object.keys(languageMapping).find(
-      (key) => channel_id === game.settings.get(MODULE_ID, key)
-    );
+    const languageMapping = game.settings.get(MODULE_ID, 'discordToPolyglotMapping');
+    const polyglotLanguage = Object.keys(languageMapping).find((key) => channel_id === key);
 
     if (polyglotLanguage) {
-      const encodedMessage = polyglotLanguage === 'common' 
-        ? content 
+      const encodedMessage = polyglotLanguage === 'common'
+        ? content
         : Polyglot.encode(content, polyglotLanguage);
 
       ChatMessage.create({
@@ -77,36 +90,38 @@ Hooks.once('ready', () => {
     }
   });
 
-  // Handle FoundryVTT -> Discord
+  // Handle FoundryVTT → Discord messages
   Hooks.on('createChatMessage', async (message) => {
     const language = message.getFlag('polyglot', 'language');
     const content = message.content;
+    const behavior = game.settings.get(MODULE_ID, 'outgoingMessageBehavior');
+    const languageMapping = game.settings.get(MODULE_ID, 'discordToPolyglotMapping');
 
-    // Check if the language is Common
+    // Send messages in Common to Discord #common
     if (language === 'common') {
       listener.sendToDiscord({
-        channel: game.settings.get(MODULE_ID, 'common'),
+        channel: languageMapping.common,
         content
       });
       return;
     }
 
-    // For other languages, garble in #common and send plain to specific channel
-    const commonChannelId = game.settings.get(MODULE_ID, 'common');
-    const languageChannelId = game.settings.get(MODULE_ID, language);
-
-    if (commonChannelId) {
+    // Handle other languages: garbled to #common, plain text to language-specific channels
+    if (behavior.garbleInCommon) {
       listener.sendToDiscord({
-        channel: commonChannelId,
-        content: Polyglot.encode(content, 'common') // Garbled
+        channel: languageMapping.common,
+        content: Polyglot.encode(content, 'common') // Garbled message for #common
       });
     }
 
-    if (languageChannelId) {
-      listener.sendToDiscord({
-        channel: languageChannelId,
-        content // Plain text
-      });
+    if (behavior.sendPlainToLanguageChannel) {
+      const targetChannel = Object.keys(languageMapping).find((key) => languageMapping[key] === language);
+      if (targetChannel) {
+        listener.sendToDiscord({
+          channel: targetChannel,
+          content // Plain text for language-specific channels
+        });
+      }
     }
   });
 });
