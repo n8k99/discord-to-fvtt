@@ -6,6 +6,7 @@ const config = {
   gatewayUrl: 'wss://gateway.discord.gg',
   version: 10
 };
+
 const State = {
   Closed: 'closed',
   Established: 'established',
@@ -24,28 +25,6 @@ export class Listener extends EventTarget {
     status: State.Closed
   };
 
-  #toggleControl = {
-    active: false,
-    toggle: true,
-    icon: 'fa-brands fa-discord',
-    name: 'discord',
-    title: `${MODULE_ID}.name`,
-    onClick: this.onToolbarToggle.bind(this)
-  };
-
-  set acceptedChannels(value) {
-    if (!!value) this.acceptedChannelIds = value.split(',');
-    else this.acceptedChannelIds = [];
-  }
-
-  set token(value) {
-    this.close();
-
-    if (value) {
-      this.#client = this.buildClient({ url: config.gatewayUrl, token: value });
-    }
-  }
-
   constructor() {
     super();
 
@@ -55,11 +34,15 @@ export class Listener extends EventTarget {
     Hooks.on('getSceneControlButtons', this.addToggleControlBtn.bind(this));
   }
 
-  addToggleControlBtn(controls) {
-    if (!game.user.isGM) return;
+  set acceptedChannels(value) {
+    this.acceptedChannelIds = value ? value.split(',') : [];
+  }
 
-    const bar = controls.find((c) => c.name === 'token');
-    bar?.tools.push(this.#toggleControl);
+  set token(value) {
+    this.close();
+    if (value) {
+      this.#client = this.buildClient({ url: config.gatewayUrl, token: value });
+    }
   }
 
   buildClient({ url, token }) {
@@ -75,136 +58,45 @@ export class Listener extends EventTarget {
     ws.addEventListener('close', this.onClose.bind(this));
     ws.addEventListener('error', this.onError.bind(this));
     ws.addEventListener('message', this.onReceive.bind(this));
-
     return ws;
   }
 
   close(code = 1000, reason = '') {
-    if (this.clientState.hb) {
-      clearInterval(this.clientState.hb);
-    }
-
+    if (this.clientState.hb) clearInterval(this.clientState.hb);
     this.#client?.removeEventListener('close', this.onClose);
     this.#client?.removeEventListener('error', this.onError);
     this.#client?.removeEventListener('message', this.onReceive);
     this.#client?.close(code, reason);
 
     this.clientState = { ...this.#initialState };
-
-    this.#toggleControl.active = false;
-    ui.controls.render();
   }
 
   isValidGuildChannel({ channel_id, guild_id }) {
-    if (guild_id !== game.settings.get(MODULE_ID, 'discordGuildId')) return false;
-
-    return this.acceptedChannelIds.length === 0 || !!this.acceptedChannelIds.includes(channel_id);
-  }
-
-  onClose(data) {
-    log('Connection closed', data);
-    this.close();
-
-    if (data.code === 1006) {
-      this.resume(false);
-    }
-  }
-
-  onError(data) {
-    log('Connection error', data);
-  }
-
-  onReceive({ data }) {
-    return new Promise((resolve, reject) => {
-      this._onReceive(JSON.parse(data))
-        .then(resolve)
-        .catch((err) => {
-          log('WS receive error', err);
-          reject(err);
-        });
-    });
-  }
-
-  onToolbarToggle(value) {
-    if (value) {
-      this.#client = this.buildClient({ url: config.gatewayUrl, token: game.settings.get(MODULE_ID, 'discordToken') });
-    } else {
-      this.close();
-    }
-
-    this.#toggleControl.active = value;
-    ui.controls.render();
-  }
-
-  resume(closeFirst = true) {
-    if (closeFirst) {
-      this.close(3000, 'resume');
-    }
-
-    this.#client = this.buildClient({ resume: true, url: this.clientState.gatewayUrl, token: this.clientState.token });
-    this.#client.addEventListener('open', this._sendResume.bind(this));
-  }
-
-  _destroy() {
-    Hooks.off('getSceneControlButtons', this.addToggleControlBtn);
-  }
-
-  async _getRenderContent(message) {
-    const mentions = message.content.matchAll(/(?:<[#@](\d+)>)+/g);
-    const channels = this.clientState.channels[message.guild_id];
-    const members = this.clientState.members[message.guild_id];
-
-    for (const mention of mentions) {
-      const type = mention[0][1];
-
-      if (type === '@' && members[mention[1]]) {
-        message.content = message.content.replace(mention[0], `<u>@${members[mention[1]].display}</u>`);
-      } else if (type === '#' && channels[mention[1]]) {
-        message.content = message.content.replace(mention[0], `<u>#${channels[mention[1]].name}</u>`);
-      }
-    }
-
-    return renderTemplate(`modules/${MODULE_ID}/static/templates/chat-card.hbs`, {
-      message,
-      attachments: message.attachments.map((a) => ({
-        filename: a.filename,
-        image: a.content_type?.startsWith('image') ?? false,
-        url: a.url,
-        video: a.content_type?.startsWith('video') ?? false
-      })),
-      channel: this.clientState.channels[message.guild_id][message.channel_id]?.name,
-      content: message.content
-    });
-  }
-
-  _onGuildJoin(data) {
-    this.clientState.channels ??= {};
-    this.clientState.channels[data.id] = data.channels
-      .filter((c) => c.type === 0)
-      .reduce((curr, val) => ({ ...curr, [val.id]: { name: val.name, type: val.type } }), {});
-
-    this.clientState.members ??= {};
-    this.clientState.members[data.id] = data.members
-      .filter((u) => !u.pending)
-      .reduce(
-        (curr, val) => ({
-          ...curr,
-          [val.user.id]: {
-            avatarId: val.avatar ?? val.user.avatar,
-            display: val.nick ?? val.user.display_name ?? val.user.username,
-            username: val.user.username
-          }
-        }),
-        {}
-      );
+    return (
+      guild_id === game.settings.get(MODULE_ID, 'discordGuildId') &&
+      (this.acceptedChannelIds.length === 0 || this.acceptedChannelIds.includes(channel_id))
+    );
   }
 
   async _onMessageCreated(data) {
     const fvttUser = game.users.find((u) => u.getFlag(MODULE_ID, 'did') === data.author.id);
 
+    // Map Discord channel to Polyglot language
+    const channelLanguageMapping = {
+      common: 'common',
+      elvish: 'elvish',
+      dwarvish: 'dwarvish'
+    };
+
+    const language = channelLanguageMapping[data.channel_id] || 'common';
+    const encodedContent =
+      language === 'common'
+        ? data.content // Pass directly for #common
+        : game.modules.get('polyglot').api.encode(data.content, language); // Encode for other languages
+
     return ChatMessage.create({
       author: fvttUser?.id,
-      content: await this._getRenderContent(data),
+      content: encodedContent,
       flags: {
         [MODULE_ID]: {
           managed: true,
@@ -216,92 +108,78 @@ export class Listener extends EventTarget {
     });
   }
 
-  async _onMessageDeleted(data) {
-    const msg = game.messages.find((m) => m.getFlag(MODULE_ID, 'messageId') === data.id);
-    if (!msg) return Promise.resolve();
+  async _onReceive({ data }) {
+    const parsedData = JSON.parse(data);
 
-    return !!game.settings.get(MODULE_ID, 'preserveDeletedMessages')
-      ? msg.update({
-          content: msg.content.replace('class="d2fvtt-message"', 'class="d2fvtt-message deleted"')
+    // Skip messages that are already flagged as managed
+    if (parsedData.flags?.[MODULE_ID]?.managed) return;
+
+    switch (parsedData.t) {
+      case 'MESSAGE_CREATE':
+        return this._onMessageCreated(parsedData.d);
+      case 'MESSAGE_UPDATE':
+        return this._onMessageUpdated(parsedData.d);
+      case 'MESSAGE_DELETE':
+        return this._onMessageDeleted(parsedData.d);
+    }
+  }
+
+  async _sendToDiscord(message, language) {
+    const channelMapping = {
+      common: 'discord_common_channel_id', // Replace with actual channel IDs
+      elvish: 'discord_elvish_channel_id',
+      dwarvish: 'discord_dwarvish_channel_id'
+    };
+
+    if (language === 'common') {
+      // Send directly to #common
+      this.#client.send(
+        JSON.stringify({
+          op: 4,
+          d: { channel_id: channelMapping.common, content: message.content }
         })
-      : msg.delete();
+      );
+    } else {
+      // Garbled text to #common
+      this.#client.send(
+        JSON.stringify({
+          op: 4,
+          d: { channel_id: channelMapping.common, content: game.modules.get('polyglot').api.encode(message.content, 'common') }
+        })
+      );
+
+      // Plain text to language-specific channel
+      this.#client.send(
+        JSON.stringify({
+          op: 4,
+          d: { channel_id: channelMapping[language], content: message.content }
+        })
+      );
+    }
   }
 
   async _onMessageUpdated(data) {
     const msg = game.messages.find((m) => m.getFlag(MODULE_ID, 'messageId') === data.id);
-    if (!msg) return Promise.resolve();
-
+    if (!msg) return;
     return msg.update({ content: await this._getRenderContent(data) });
   }
 
-  async _onReceive(data) {
-    log('Received message', data);
-    const { d, op, s, t } = data;
+  async _onMessageDeleted(data) {
+    const msg = game.messages.find((m) => m.getFlag(MODULE_ID, 'messageId') === data.id);
+    if (!msg) return;
+    return msg.delete();
+  }
 
-    switch (op) {
-      case OpCodes.Hello:
-        this.clientState.heartbeatInterval = d.heartbeat_interval;
-
-        setTimeout(() => {
-          this._sendHeartbeat();
-          this.clientState.hb = setInterval(this._sendHeartbeat.bind(this), this.clientState.heartbeatInterval);
-        }, this.clientState.heartbeatInterval * Math.random());
-
-        this._sendIdentify();
-
-        break;
-      case OpCodes.Heartbeat:
-        this._sendHeartbeat();
-        break;
-      case OpCodes.HeartbeatAck:
-        this.clientState.heartbeatAcknowledged = true;
-
-        if (this.clientState.status === 'open') {
-          this._sendIdentify();
-        }
-
-        break;
-      case OpCodes.InvalidSession:
-        if (!d) {
-          this.close();
-          this.#client = this.buildClient({ url: config.gatewayUrl, token: this.clientState.token });
-        } else {
-          this.resume();
-        }
-
-        break;
-      case OpCodes.Ready:
-        if (t === 'READY') {
-          this.clientState.gatewayUrl = d.resume_gateway_url ?? this.clientState.gatewayUrl;
-          this.clientState.sessionId = d.session_id ?? this.clientState.sessionId;
-          this.clientState.seq = s ?? this.clientState.seq;
-          this.clientState.status = 'ready';
-
-          this.#toggleControl.active = true;
-          ui.controls.render();
-        }
-
-        break;
-      case OpCodes.Reconnect:
-        this.resume();
-        break;
-    }
-
-    if (this.clientState.status !== 'ready') return;
-
-    if (t === 'GUILD_CREATE') {
-      this._onGuildJoin(d);
-    } else {
-      if (!d || !this.isValidGuildChannel(d)) return;
-
-      switch (t) {
-        case 'MESSAGE_CREATE':
-          return this._onMessageCreated(d);
-        case 'MESSAGE_UPDATE':
-          return this._onMessageUpdated(d);
-        case 'MESSAGE_DELETE':
-          return this._onMessageDeleted(d);
-      }
+  async _onReceive({ data }) {
+    const parsedData = JSON.parse(data);
+    if (parsedData.flags?.[MODULE_ID]?.managed) return;
+    switch (parsedData.t) {
+      case 'MESSAGE_CREATE':
+        return this._onMessageCreated(parsedData.d);
+      case 'MESSAGE_UPDATE':
+        return this._onMessageUpdated(parsedData.d);
+      case 'MESSAGE_DELETE':
+        return this._onMessageDeleted(parsedData.d);
     }
   }
 
@@ -327,20 +205,6 @@ export class Listener extends EventTarget {
             browser: window.navigator.userAgent,
             device: 'DiscordToFVTT'
           },
-          token: this.clientState.token
-        }
-      })
-    );
-  }
-
-  _sendResume() {
-    this.#client.removeEventListener('open', this._sendResume);
-    this.#client.send(
-      JSON.stringify({
-        op: OpCodes.Resume,
-        d: {
-          session_id: this.clientState.sessionId,
-          seq: this.clientState.seq,
           token: this.clientState.token
         }
       })
